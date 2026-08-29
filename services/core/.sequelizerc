@@ -1,0 +1,13 @@
+"use strict";
+
+const path = require("path");
+
+/**
+ * Points sequelize-cli at this service's migration layout.
+ */
+module.exports = {
+  config: path.resolve(__dirname, "src/config/sequelize-cli.cjs"),
+  "migrations-path": path.resolve(__dirname, "migrations"),
+  "seeders-path": path.resolve(__dirname, "seeders"),
+  "models-path": path.resolve(__dirname, "src/models"),
+};
