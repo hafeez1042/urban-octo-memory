@@ -52,3 +52,7 @@ openapi.json
 # Misc
 .DS_Store
 *.pem
+
+# autobuild runner
+.pm/logs/
+.pm/autobuild.lock

@@ -14,7 +14,8 @@
     "test:db:down": "docker compose -f docker-compose.test.yml down -v",
     "db:migrate": "pnpm --filter @services/core db:migrate",
     "db:migrate:undo": "pnpm --filter @services/core db:migrate:undo",
-    "db:migrate:status": "pnpm --filter @services/core db:migrate:status"
+    "db:migrate:status": "pnpm --filter @services/core db:migrate:status",
+    "autobuild": "node scripts/autobuild.mjs"
   },
   "devDependencies": {
     "prettier": "^3.6.2",
