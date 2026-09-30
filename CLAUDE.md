@@ -307,7 +307,9 @@ If you are about to do any of the following, **stop and reconsider**:
 
 - Imports: library imports first, then local imports
 - 2-space indentation, semicolons, trailing commas
-- Comments explain *why*, not *what* — omit obvious comments
+- **Comments: default to none.** Add one only when the *why* is non-obvious (hidden
+  constraint, workaround, surprising behaviour). Never restate what the code does, narrate
+  steps, label sections, or leave commented-out code
 - Early returns to reduce nesting
 - UTC in storage and transport; time zone is a rendering concern
 
