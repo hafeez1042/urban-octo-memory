@@ -32,6 +32,7 @@ Detailed rules live in `rules/`. This file is the summary; `rules/` is authorita
 | Naming and style | `rules/general.md` |
 | Frontend structure | `rules/frontend/vite-folder-structure.md` |
 | Frontend styling, tokens, fonts | `rules/frontend/styling.md` |
+| UI/UX practice, layout, states, a11y | `rules/frontend/ui-ux.md` |
 | Components, data fetching, services | `rules/frontend/react-component.md`, `fetch-data-useQuery.md`, `services.md` |
 | Testing — definition of done | `rules/testing/overview.md` |
 | Playwright end-to-end specs | `rules/testing/playwright-e2e.md` |
