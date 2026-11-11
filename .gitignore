@@ -56,3 +56,4 @@ openapi.json
 # autobuild runner
 .pm/logs/
 .pm/autobuild.lock
+autobuild.profiles.json

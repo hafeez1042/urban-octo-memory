@@ -6,8 +6,13 @@
 //   pnpm autobuild                                    # uses .pm/config.json, asks if missing
 //   pnpm autobuild --plan <p> --schema <p> --ui <p>   # first run
 //   pnpm autobuild --once                             # a single session, no loop
+//
+// Accounts: list Claude config dirs in autobuild.profiles.json (see .example). On a usage
+// limit the runner switches to the next free profile; when all are limited it sleeps until
+// the earliest reset. The file is re-read before every session, so it can be edited live.
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import readline from "node:readline/promises";
 
@@ -19,6 +24,9 @@ const STATE = path.join(PM, "state.json");
 const TASKS = path.join(PM, "tasks.json");
 const BLOCKED = path.join(PM, "BLOCKED.md");
 const LOCK = path.join(PM, "autobuild.lock");
+const PROFILES_FILE = path.join(ROOT, "autobuild.profiles.json");
+const PROFILE_LIMITS = path.join(LOGS, "profile-limits.json");
+const DEFAULT_CONFIG_DIR = path.join(os.homedir(), ".claude");
 
 const MAX_FAILURES = 5;
 const MAX_STALLS = 3;
@@ -86,6 +94,47 @@ function acquireLock() {
 
 const releaseLock = () => fs.rmSync(LOCK, { force: true });
 
+const expandHome = (p) => path.resolve(p.replace(/^~(?=$|[\\/])/, os.homedir()));
+const profileName = (p) => path.basename(p);
+
+function loadProfiles() {
+  const list = readJson(PROFILES_FILE)?.profiles ?? [DEFAULT_CONFIG_DIR];
+  const dirs = list.map(expandHome).filter((p) => {
+    if (fs.existsSync(p)) return true;
+    log(`profile dir not found, skipping: ${p}`);
+    return false;
+  });
+  if (!dirs.length) throw new Error(`No usable profiles in ${PROFILES_FILE}`);
+  return dirs;
+}
+
+const readLimits = () => readJson(PROFILE_LIMITS) ?? {};
+
+function markLimited(profile, resetAt) {
+  fs.writeFileSync(PROFILE_LIMITS, JSON.stringify({ ...readLimits(), [profile]: resetAt.toISOString() }, null, 2));
+}
+
+// Stays on the current profile while it is free, otherwise the first free one in file order.
+function pickProfile(profiles, current) {
+  const limits = readLimits();
+  const freeAt = (p) => (limits[p] ? new Date(limits[p]).getTime() : 0);
+  const now = Date.now();
+  const ordered = profiles.includes(current) ? [current, ...profiles.filter((p) => p !== current)] : profiles;
+  const free = ordered.find((p) => freeAt(p) <= now);
+  if (free) return { profile: free, waitMs: 0 };
+  const soonest = [...profiles].sort((a, b) => freeAt(a) - freeAt(b))[0];
+  return { profile: soonest, waitMs: freeAt(soonest) - now };
+}
+
+// The default dir must run with CLAUDE_CONFIG_DIR unset: its state lives in ~/.claude.json,
+// which CLAUDE_CONFIG_DIR=~/.claude would not find.
+function profileEnv(profile) {
+  const env = { ...process.env };
+  if (profile === DEFAULT_CONFIG_DIR) delete env.CLAUDE_CONFIG_DIR;
+  else env.CLAUDE_CONFIG_DIR = profile;
+  return env;
+}
+
 // Progress = new commits or task-state changes. Used to tell a stall from real work.
 function progressMarker() {
   const head = fs.existsSync(path.join(ROOT, ".git/HEAD"))
@@ -107,13 +156,16 @@ function nextClockTime(hour, minute, meridiem) {
 }
 
 // Only called on a failed run, so feature code that mentions "rate limit" can't trigger it.
+// "account" limits belong to one profile (switch); "overloaded" is server-wide (just wait).
 function detectLimit(text) {
   const epoch = text.match(/limit reached\|(\d{10})/i);
-  if (epoch) return new Date(Number(epoch[1]) * 1000);
+  if (epoch) return { kind: "account", resetAt: new Date(Number(epoch[1]) * 1000) };
   const clock = text.match(/resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i);
-  if (clock && /limit/i.test(text)) return nextClockTime(Number(clock[1]), Number(clock[2] ?? 0), clock[3]);
-  if (/overloaded|529/i.test(text)) return new Date(Date.now() + OVERLOADED_SLEEP_MS);
-  if (/usage limit|hit your limit|rate.?limit|429|quota/i.test(text)) return new Date(Date.now() + DEFAULT_LIMIT_SLEEP_MS);
+  if (clock && /limit/i.test(text))
+    return { kind: "account", resetAt: nextClockTime(Number(clock[1]), Number(clock[2] ?? 0), clock[3]) };
+  if (/overloaded|529/i.test(text)) return { kind: "overloaded", resetAt: new Date(Date.now() + OVERLOADED_SLEEP_MS) };
+  if (/usage limit|hit your limit|rate.?limit|429|quota/i.test(text))
+    return { kind: "account", resetAt: new Date(Date.now() + DEFAULT_LIMIT_SLEEP_MS) };
   return null;
 }
 
@@ -130,7 +182,7 @@ function printEvent(evt) {
   if (evt.type === "result") log(`session ended: ${evt.subtype}${evt.is_error ? " (error)" : ""}`);
 }
 
-function runSession(runNo, inputs) {
+function runSession(runNo, inputs, profile) {
   const prompt =
     `HEADLESS autobuild run #${runNo}. Continue the build per your instructions, resuming from .pm/. ` +
     `Inputs: --plan "${inputs.plan}" --schema "${inputs.schema}" --ui "${inputs.ui}".`;
@@ -140,7 +192,7 @@ function runSession(runNo, inputs) {
 
   return new Promise((resolve) => {
     // Prompt goes via stdin so no argument needs shell quoting on Windows.
-    const child = spawn("claude", args, { cwd: ROOT, shell: process.platform === "win32", env: process.env });
+    const child = spawn("claude", args, { cwd: ROOT, shell: process.platform === "win32", env: profileEnv(profile) });
     let buffer = "";
     let stderr = "";
     let result = null;
@@ -199,6 +251,7 @@ async function main() {
   let failures = 0;
   let stalls = 0;
   let runNo = (readJson(STATE)?.runCount ?? 0) + 1;
+  let current = null;
 
   while (true) {
     if (readJson(STATE)?.phase === "done") return log("build complete — see .pm/FINAL_REPORT.md");
@@ -209,20 +262,34 @@ async function main() {
       return;
     }
 
+    const pick = pickProfile(loadProfiles(), current);
+    if (pick.waitMs > 0) {
+      const wait = pick.waitMs + 60_000;
+      log(`all profiles limited — sleeping until ${new Date(Date.now() + wait).toLocaleString()}`);
+      await sleep(wait);
+      continue;
+    }
+    if (pick.profile !== current) log(`using profile ${profileName(pick.profile)}`);
+    current = pick.profile;
+
     const before = progressMarker();
-    log(`starting session #${runNo}`);
-    const { failed, errorText, marker } = await runSession(runNo++, inputs);
+    log(`starting session #${runNo} [${profileName(current)}]`);
+    const { failed, errorText, marker } = await runSession(runNo++, inputs, current);
     const progressed = progressMarker() !== before;
 
     if (marker === "COMPLETE" && readJson(STATE)?.phase === "done") continue;
     if (marker === "BLOCKED") continue; // loop top prints BLOCKED.md
 
     if (failed) {
-      const resetAt = detectLimit(errorText);
-      if (resetAt) {
-        const wait = Math.max(resetAt.getTime() - Date.now(), 0) + 60_000;
-        log(`usage limit — sleeping until ${new Date(Date.now() + wait).toLocaleString()}`);
-        await sleep(wait);
+      const limit = detectLimit(errorText);
+      if (limit?.kind === "account") {
+        markLimited(current, limit.resetAt);
+        log(`usage limit on ${profileName(current)} until ${limit.resetAt.toLocaleString()} — switching`);
+        continue;
+      }
+      if (limit) {
+        log(`API overloaded — retrying at ${limit.resetAt.toLocaleString()}`);
+        await sleep(Math.max(limit.resetAt.getTime() - Date.now(), 0));
         continue;
       }
       failures = progressed ? 1 : failures + 1;
